@@ -187,11 +187,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "$LOG_DIR"
 
-# Kill existing claude sessions for clean restart
+# Kill existing monitor and claude sessions for clean restart
+pkill -f monitor-urls.sh 2>/dev/null || true
 for i in $(seq 1 "$SESSION_COUNT"); do
   tmux kill-session -t "claude-$i" 2>/dev/null || true
 done
-rm -f "$LOG_DIR"/session-*.log
+rm -f "$LOG_DIR"/session-*.log "$LOG_DIR"/monitor.log
 
 # Check Claude authentication
 if ! claude --version > /dev/null 2>&1; then
