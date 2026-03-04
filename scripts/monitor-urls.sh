@@ -1,64 +1,34 @@
 #!/bin/bash
-# Monitors Claude Code log files for Remote Control URLs and sends them to Slack.
-# Usage: monitor-urls.sh <log_dir> <session_count>
+# Monitors Claude Code log file for Remote Control URL and sends it to Slack.
+# Usage: monitor-urls.sh <log_dir> <session-name>
 
 set -euo pipefail
 
 LOG_DIR="${1:-$HOME/claude-logs}"
-SESSION_COUNT="${2:-${CLAUDE_SESSION_COUNT:-8}}"
+SESSION_NAME="${2:-claude}"
+LOG_FILE="$LOG_DIR/$SESSION_NAME.log"
 TIMEOUT=300  # 5 minutes
 POLL_INTERVAL=5
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-declare -A NOTIFIED
-
-check_and_notify() {
-  local session_name="$1"
-  local log_file="$2"
-
-  if [ "${NOTIFIED[$session_name]:-}" = "1" ]; then
-    return
-  fi
-
-  if [ ! -f "$log_file" ]; then
-    return
-  fi
-
-  local url
-  url=$(grep -oP 'https://claude\.ai/code/[^\s"]+' "$log_file" 2>/dev/null | tail -1 || true)
-
-  if [ -n "$url" ]; then
-    NOTIFIED[$session_name]="1"
-    echo "[$(date)] $session_name: Remote Control URL detected: $url"
-    "$SCRIPT_DIR/send-slack-notification.sh" "$session_name Remote Control URL: $url" || true
-  fi
-}
-
-echo "Monitoring $SESSION_COUNT sessions for Remote Control URLs (timeout: ${TIMEOUT}s)..."
+echo "Monitoring $SESSION_NAME for Remote Control URL (timeout: ${TIMEOUT}s)..."
 
 START_TIME=$(date +%s)
 
 while true; do
-  ALL_FOUND=true
+  if [ -f "$LOG_FILE" ]; then
+    URL=$(grep -oP 'https://claude\.ai/code/[^\s"]+' "$LOG_FILE" 2>/dev/null | tail -1 || true)
 
-  for i in $(seq 1 "$SESSION_COUNT"); do
-    SESSION_NAME="claude-$i"
-    LOG_FILE="$LOG_DIR/session-$i.log"
-    check_and_notify "$SESSION_NAME" "$LOG_FILE"
-
-    if [ "${NOTIFIED[$SESSION_NAME]:-}" != "1" ]; then
-      ALL_FOUND=false
+    if [ -n "$URL" ]; then
+      echo "[$(date)] $SESSION_NAME: Remote Control URL detected: $URL"
+      "$SCRIPT_DIR/send-slack-notification.sh" "$SESSION_NAME Remote Control URL: $URL" || true
+      break
     fi
-  done
-
-  if [ "$ALL_FOUND" = true ]; then
-    echo "All $SESSION_COUNT URLs detected and notified."
-    break
   fi
 
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-    echo "Timeout reached (${TIMEOUT}s). Some URLs may not have been detected."
+    echo "Timeout reached (${TIMEOUT}s). URL not detected."
     break
   fi
 

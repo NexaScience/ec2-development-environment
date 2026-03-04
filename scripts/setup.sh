@@ -36,8 +36,7 @@ npm install -g @devcontainers/cli
 
 # --- Environment variables ---
 cat > /home/ubuntu/.claude-env << 'ENVEOF'
-SLACK_WEBHOOK_URL=${slack_webhook_url}
-CLAUDE_SESSION_COUNT=${claude_session_count}
+SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
 ENVEOF
 chown ubuntu:ubuntu /home/ubuntu/.claude-env
 chmod 600 /home/ubuntu/.claude-env
@@ -54,21 +53,24 @@ fi
 BASHEOF
 
 # --- Clone the application repository ---
-echo "Cloning repository: ${git_repo_url}"
-git clone "${git_repo_url}" /home/ubuntu/app
-chown -R ubuntu:ubuntu /home/ubuntu/app
+REPO_NAME=$(basename "${GIT_REPO_URL}" .git)
+REPO_DIR="/home/ubuntu/$REPO_NAME"
+
+echo "Cloning repository: ${GIT_REPO_URL}"
+git clone "${GIT_REPO_URL}" "$REPO_DIR"
+chown -R ubuntu:ubuntu "$REPO_DIR"
 
 # --- Create .env from .env.example if needed ---
-if [ -f /home/ubuntu/app/.env.example ] && [ ! -f /home/ubuntu/app/.env ]; then
-  cp /home/ubuntu/app/.env.example /home/ubuntu/app/.env
-  chown ubuntu:ubuntu /home/ubuntu/app/.env
+if [ -f "$REPO_DIR/.env.example" ] && [ ! -f "$REPO_DIR/.env" ]; then
+  cp "$REPO_DIR/.env.example" "$REPO_DIR/.env"
+  chown ubuntu:ubuntu "$REPO_DIR/.env"
   echo ".env created from .env.example"
 fi
 
 # --- Build and start the dev container ---
 echo "Starting devcontainer..."
 # postCreateCommand may fail (e.g. pre-commit install) but container still starts
-sudo -u ubuntu bash -c "cd /home/ubuntu/app && devcontainer up --workspace-folder ." || true
+sudo -u ubuntu bash -c "cd $REPO_DIR && devcontainer up --workspace-folder ." || true
 
 # --- Prepare scripts on host then copy into container ---
 SCRIPTS_DIR="/home/ubuntu/scripts"
@@ -114,60 +116,30 @@ cat > "$SCRIPTS_DIR/monitor-urls.sh" << 'MONITOREOF'
 set -euo pipefail
 
 LOG_DIR="$${1:-$HOME/claude-logs}"
-SESSION_COUNT="$${2:-$${CLAUDE_SESSION_COUNT:-8}}"
+SESSION_NAME="$${2:-claude}"
+LOG_FILE="$LOG_DIR/$SESSION_NAME.log"
 TIMEOUT=300
 POLL_INTERVAL=5
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-declare -A NOTIFIED
-
-check_and_notify() {
-  local session_name="$1"
-  local log_file="$2"
-
-  if [ "$${NOTIFIED[$session_name]:-}" = "1" ]; then
-    return
-  fi
-
-  if [ ! -f "$log_file" ]; then
-    return
-  fi
-
-  local url
-  url=$(grep -oP 'https://claude\.ai/code/[^\s"]+' "$log_file" 2>/dev/null | tail -1 || true)
-
-  if [ -n "$url" ]; then
-    NOTIFIED[$session_name]="1"
-    echo "[$(date)] $session_name: Remote Control URL detected: $url"
-    "$SCRIPT_DIR/send-slack-notification.sh" "$session_name Remote Control URL: $url" || true
-  fi
-}
-
-echo "Monitoring $SESSION_COUNT sessions for Remote Control URLs (timeout: $${TIMEOUT}s)..."
+echo "Monitoring $SESSION_NAME for Remote Control URL (timeout: $${TIMEOUT}s)..."
 
 START_TIME=$(date +%s)
 
 while true; do
-  ALL_FOUND=true
+  if [ -f "$LOG_FILE" ]; then
+    URL=$(grep -oP 'https://claude\.ai/code/[^\s"]+' "$LOG_FILE" 2>/dev/null | tail -1 || true)
 
-  for i in $(seq 1 "$SESSION_COUNT"); do
-    SESSION_NAME="claude-$i"
-    LOG_FILE="$LOG_DIR/session-$i.log"
-    check_and_notify "$SESSION_NAME" "$LOG_FILE"
-
-    if [ "$${NOTIFIED[$SESSION_NAME]:-}" != "1" ]; then
-      ALL_FOUND=false
+    if [ -n "$URL" ]; then
+      echo "[$(date)] $SESSION_NAME: Remote Control URL detected: $URL"
+      "$SCRIPT_DIR/send-slack-notification.sh" "$SESSION_NAME Remote Control URL: $URL" || true
+      break
     fi
-  done
-
-  if [ "$ALL_FOUND" = true ]; then
-    echo "All $SESSION_COUNT URLs detected and notified."
-    break
   fi
 
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-    echo "Timeout reached ($${TIMEOUT}s). Some URLs may not have been detected."
+    echo "Timeout reached ($${TIMEOUT}s). URL not detected."
     break
   fi
 
@@ -180,19 +152,22 @@ cat > "$SCRIPTS_DIR/start-claude-sessions.sh" << 'SESSIONEOF'
 #!/bin/bash
 set -euo pipefail
 
-SESSION_COUNT="$${CLAUDE_SESSION_COUNT:-8}"
-WORKSPACE_BASE="$HOME/workspace"
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <session-name>"
+  exit 1
+fi
+
+SESSION_NAME="$1"
 LOG_DIR="$HOME/claude-logs"
+LOG_FILE="$LOG_DIR/$SESSION_NAME.log"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "$LOG_DIR"
 
-# Kill existing monitor and claude sessions for clean restart
+# Kill existing session for clean restart
 pkill -f monitor-urls.sh 2>/dev/null || true
-for i in $(seq 1 "$SESSION_COUNT"); do
-  tmux kill-session -t "claude-$i" 2>/dev/null || true
-done
-rm -f "$LOG_DIR"/session-*.log "$LOG_DIR"/monitor.log
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+rm -f "$LOG_FILE" "$LOG_DIR/monitor.log"
 
 # Check Claude authentication
 if ! claude --version > /dev/null 2>&1; then
@@ -207,32 +182,16 @@ if [ ! -d "$HOME/.claude" ] || [ -z "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; th
   exit 1
 fi
 
-echo "Starting $SESSION_COUNT Claude Code remote-control sessions..."
+echo "Starting Claude Code remote-control session: $SESSION_NAME"
 
-for i in $(seq 1 "$SESSION_COUNT"); do
-  SESSION_NAME="claude-$i"
-  WORK_DIR="$WORKSPACE_BASE/session-$i"
-  LOG_FILE="$LOG_DIR/session-$i.log"
+tmux new-session -d -s "$SESSION_NAME"
+tmux send-keys -t "$SESSION_NAME" "yes | claude remote-control --dangerously-skip-permissions 2>&1 | tee -a $LOG_FILE" Enter
 
-  mkdir -p "$WORK_DIR"
-
-  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "Session $SESSION_NAME already exists, skipping."
-    continue
-  fi
-
-  tmux new-session -d -s "$SESSION_NAME" -c "$WORK_DIR"
-  tmux send-keys -t "$SESSION_NAME" "cd $WORK_DIR && [ ! -d .git ] && git init . 2>/dev/null; yes | claude remote-control --dangerously-skip-permissions 2>&1 | tee -a $LOG_FILE" Enter
-
-  echo "Started session: $SESSION_NAME (workspace: $WORK_DIR)"
-done
-
-echo "All $SESSION_COUNT sessions started."
-echo "Use 'tmux ls' to list sessions."
-echo "Use 'tmux attach -t claude-1' to attach to a session."
+echo "Session started: $SESSION_NAME"
+echo "Use 'tmux attach -t $SESSION_NAME' to attach."
 
 # Start URL monitor in background
-nohup "$SCRIPT_DIR/monitor-urls.sh" "$LOG_DIR" "$SESSION_COUNT" > "$LOG_DIR/monitor.log" 2>&1 &
+nohup "$SCRIPT_DIR/monitor-urls.sh" "$LOG_DIR" "$SESSION_NAME" > "$LOG_DIR/monitor.log" 2>&1 &
 echo "URL monitor started (PID: $!)."
 SESSIONEOF
 
@@ -247,76 +206,20 @@ if [ -n "$CONTAINER_ID" ]; then
   docker exec "$CONTAINER_ID" chown -R root:root /root/scripts
   docker exec "$CONTAINER_ID" sh -c 'chmod +x /root/scripts/*.sh'
 
-  # Inject auto-start into container's .bashrc
-  docker exec "$CONTAINER_ID" bash -c 'cat >> /root/.bashrc << '\''AUTOSTART'\''
-
-# Auto-start Claude remote-control sessions after login
-export PATH="$HOME/.local/bin:$PATH"
-if [[ $- == *i* ]] && command -v claude &>/dev/null; then
-  if [ -d "$HOME/.claude" ] && [ -n "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
-    if ! tmux has-session -t claude-1 2>/dev/null; then
-      echo "Claude authenticated. Starting remote-control sessions..."
-      set -a
-      source /root/.claude-env 2>/dev/null
-      set +a
-      ~/scripts/start-claude-sessions.sh
-    fi
-  fi
-fi
-AUTOSTART'
-
   # Copy .claude-env into container for session env vars
   docker cp /home/ubuntu/.claude-env "$CONTAINER_ID":/root/.claude-env
 
-  echo "Scripts and auto-start configured in container $CONTAINER_ID"
+  echo "Scripts configured in container $CONTAINER_ID"
 else
   echo "[WARN] No running devcontainer found. Scripts not copied."
 fi
 
-# --- enter-container.sh (convenience script on host) ---
-cat > /home/ubuntu/enter-container.sh << 'ENTEREOF'
-#!/bin/bash
-set -euo pipefail
-
-CONTAINER_ID=$(docker ps --filter "label=devcontainer.local_folder" --format '{{.ID}}' | head -1)
-
-if [ -z "$CONTAINER_ID" ]; then
-  echo "No running dev container found. Starting one..."
-  cd ~/app
-  source ~/.claude-env 2>/dev/null || true
-  devcontainer up --workspace-folder .
-  CONTAINER_ID=$(docker ps --filter "label=devcontainer.local_folder" --format '{{.ID}}' | head -1)
-fi
-
-echo "Entering container $CONTAINER_ID..."
-docker exec -it "$CONTAINER_ID" bash
-ENTEREOF
-
-chown ubuntu:ubuntu /home/ubuntu/enter-container.sh
-chmod +x /home/ubuntu/enter-container.sh
-
-# --- IMDSv2 token helper ---
-cat > /home/ubuntu/.imds-helper.sh << 'IMDSEOF'
-get_imds_token() {
-  curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-    -H "X-aws-ec2-metadata-token-ttl-seconds: 300"
-}
-get_metadata() {
-  local token
-  token=$(get_imds_token)
-  curl -s -H "X-aws-ec2-metadata-token: $token" \
-    "http://169.254.169.254/latest/meta-data/$1"
-}
-IMDSEOF
-chown ubuntu:ubuntu /home/ubuntu/.imds-helper.sh
-
 # --- Send startup Slack notification from host ---
-if [ -n "${slack_webhook_url}" ]; then
+if [ -n "${SLACK_WEBHOOK_URL}" ]; then
   PUBLIC_IP=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4 || echo "unknown")
-  PAYLOAD=$(jq -n --arg text "[$PUBLIC_IP] EC2 + Dev Container started. SSH: ssh ubuntu@$PUBLIC_IP then ./enter-container.sh" '{"text": $text}')
-  curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${slack_webhook_url}" || true
+  PAYLOAD=$(jq -n --arg text "[$PUBLIC_IP] EC2 + Dev Container started. SSH: ssh ubuntu@$PUBLIC_IP" '{"text": $text}')
+  curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${SLACK_WEBHOOK_URL}" || true
 fi
 
 echo "=== Setup complete ==="
-echo "SSH into the instance, then run: ./enter-container.sh"
 echo "Inside the container: claude login (first time), then ~/scripts/start-claude-sessions.sh"

@@ -13,11 +13,6 @@ output "ssh_command" {
   value       = "ssh ubuntu@${aws_instance.claude_dev.public_ip}"
 }
 
-output "enter_container" {
-  description = "Command to enter the dev container after SSH"
-  value       = "./enter-container.sh"
-}
-
 output "first_time_setup" {
   description = "First time setup: authenticate Claude inside the container"
   value       = "claude login"
@@ -25,10 +20,10 @@ output "first_time_setup" {
 
 output "app_clone_path" {
   description = "Path where the application repository is cloned on EC2"
-  value       = "/home/ubuntu/app"
+  value       = "/home/ubuntu/${basename(var.GIT_REPO_URL)}"
 }
 
-output "start_sessions" {
-  description = "Command to start Claude remote-control sessions inside the container"
+output "start_session" {
+  description = "Command to start Claude remote-control session inside the container"
   value       = "~/scripts/start-claude-sessions.sh"
 }

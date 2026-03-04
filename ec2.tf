@@ -21,13 +21,13 @@ data "aws_ami" "ubuntu" {
 
 # --- Key Pair ---
 resource "aws_key_pair" "deploy" {
-  key_name   = "${var.project_name}-key"
-  public_key = var.ssh_public_key
+  key_name   = "${var.PROJECT_NAME}-key"
+  public_key = var.SSH_PUBLIC_KEY
 }
 
 # --- Security Group ---
 resource "aws_security_group" "claude_dev" {
-  name        = "${var.project_name}-sg"
+  name        = "${var.PROJECT_NAME}-sg"
   description = "Security group for Claude Code dev instance"
   vpc_id      = aws_vpc.main.id
 
@@ -36,7 +36,7 @@ resource "aws_security_group" "claude_dev" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
+    cidr_blocks = [var.ALLOWED_SSH_CIDR]
   }
 
   egress {
@@ -48,20 +48,20 @@ resource "aws_security_group" "claude_dev" {
   }
 
   tags = {
-    Name = "${var.project_name}-sg"
+    Name = "${var.PROJECT_NAME}-sg"
   }
 }
 
 # --- EC2 Instance ---
 resource "aws_instance" "claude_dev" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
+  instance_type          = var.INSTANCE_TYPE
   key_name               = aws_key_pair.deploy.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.claude_dev.id]
 
   root_block_device {
-    volume_size = var.root_volume_size
+    volume_size = var.ROOT_VOLUME_SIZE
     volume_type = "gp3"
     encrypted   = true
   }
@@ -73,12 +73,11 @@ resource "aws_instance" "claude_dev" {
   }
 
   user_data = templatefile("${path.module}/scripts/setup.sh", {
-    slack_webhook_url    = var.slack_webhook_url
-    claude_session_count = var.claude_session_count
-    git_repo_url         = var.git_repo_url
+    SLACK_WEBHOOK_URL = var.SLACK_WEBHOOK_URL
+    GIT_REPO_URL      = var.GIT_REPO_URL
   })
 
   tags = {
-    Name = "${var.project_name}-instance"
+    Name = "${var.PROJECT_NAME}-instance"
   }
 }

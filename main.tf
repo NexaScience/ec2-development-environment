@@ -10,7 +10,7 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region = var.AWS_REGION
 }
 
 # --- VPC ---
@@ -20,7 +20,7 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
 
   tags = {
-    Name = "${var.project_name}-vpc"
+    Name = "${var.PROJECT_NAME}-vpc"
   }
 }
 
@@ -29,10 +29,10 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
-  availability_zone       = "${var.aws_region}a"
+  availability_zone       = "${var.AWS_REGION}a"
 
   tags = {
-    Name = "${var.project_name}-public"
+    Name = "${var.PROJECT_NAME}-public"
   }
 }
 
@@ -41,7 +41,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "${var.project_name}-igw"
+    Name = "${var.PROJECT_NAME}-igw"
   }
 }
 
@@ -55,7 +55,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "${var.project_name}-public-rt"
+    Name = "${var.PROJECT_NAME}-public-rt"
   }
 }
 

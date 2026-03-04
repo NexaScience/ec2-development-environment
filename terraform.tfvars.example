@@ -1,9 +1,0 @@
-aws_region           = "ap-northeast-1"
-project_name         = "claude-dev"
-instance_type        = "t3.xlarge"
-allowed_ssh_cidr     = "203.0.113.0/32"       # Replace with your IP
-ssh_public_key       = "ssh-ed25519 AAAA..."   # Replace with your public key
-slack_webhook_url    = "https://hooks.slack.com/services/T.../B.../..." # Optional
-claude_session_count = 8
-git_repo_url         = "https://github.com/your-org/your-app.git"      # App repo with .devcontainer/
-root_volume_size     = 100
