@@ -37,6 +37,11 @@ variable "GIT_REPO_URL" {
   type        = string
 }
 
+variable "INFRA_REPO_URL" {
+  description = "URL of this infrastructure repository to clone on EC2"
+  type        = string
+}
+
 variable "ROOT_VOLUME_SIZE" {
   description = "Root EBS volume size in GB"
   type        = number

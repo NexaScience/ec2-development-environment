@@ -14,8 +14,8 @@ MESSAGE="$1"
 WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 
 if [ -z "$WEBHOOK_URL" ]; then
-  echo "[WARN] SLACK_WEBHOOK_URL is not set. Skipping notification."
-  exit 0
+  echo "[ERROR] SLACK_WEBHOOK_URL is not set."
+  exit 1
 fi
 
 HOSTNAME=$(hostname)
