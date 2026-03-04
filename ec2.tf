@@ -75,6 +75,7 @@ resource "aws_instance" "claude_dev" {
   user_data = templatefile("${path.module}/scripts/setup.sh", {
     SLACK_WEBHOOK_URL = var.SLACK_WEBHOOK_URL
     GIT_REPO_URL      = var.GIT_REPO_URL
+    INFRA_REPO_URL    = var.INFRA_REPO_URL
   })
 
   tags = {

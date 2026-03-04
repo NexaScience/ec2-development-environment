@@ -35,8 +35,10 @@ apt-get install -y nodejs
 npm install -g @devcontainers/cli
 
 # --- Environment variables ---
-cat > /home/ubuntu/.claude-env << 'ENVEOF'
+REPO_NAME=$(basename "${GIT_REPO_URL}" .git)
+cat > /home/ubuntu/.claude-env << ENVEOF
 SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+WORKSPACE_DIR=/workspaces/$REPO_NAME
 ENVEOF
 chown ubuntu:ubuntu /home/ubuntu/.claude-env
 chmod 600 /home/ubuntu/.claude-env
@@ -53,7 +55,6 @@ fi
 BASHEOF
 
 # --- Clone the application repository ---
-REPO_NAME=$(basename "${GIT_REPO_URL}" .git)
 REPO_DIR="/home/ubuntu/$REPO_NAME"
 
 echo "Cloning repository: ${GIT_REPO_URL}"
@@ -72,137 +73,18 @@ echo "Starting devcontainer..."
 # postCreateCommand may fail (e.g. pre-commit install) but container still starts
 sudo -u ubuntu bash -c "cd $REPO_DIR && devcontainer up --workspace-folder ." || true
 
-# --- Prepare scripts on host then copy into container ---
-SCRIPTS_DIR="/home/ubuntu/scripts"
-mkdir -p "$SCRIPTS_DIR"
-
-# send-slack-notification.sh
-cat > "$SCRIPTS_DIR/send-slack-notification.sh" << 'SLACKEOF'
-#!/bin/bash
-set -euo pipefail
-
-if [ $# -lt 1 ]; then
-  echo "Usage: $0 <message>"
-  exit 1
-fi
-
-MESSAGE="$1"
-WEBHOOK_URL="$${SLACK_WEBHOOK_URL:-}"
-
-if [ -z "$WEBHOOK_URL" ]; then
-  echo "[WARN] SLACK_WEBHOOK_URL is not set. Skipping notification."
-  exit 0
-fi
-
-HOSTNAME=$(hostname)
-PAYLOAD=$(python3 -c "import json,sys; print(json.dumps({'text': sys.argv[1]}))" "[$HOSTNAME] $MESSAGE")
-
-HTTP_STATUS=$(curl -s -o /dev/null -w "%%{http_code}" \
-  -X POST -H "Content-Type: application/json" \
-  -d "$PAYLOAD" \
-  "$WEBHOOK_URL")
-
-if [ "$HTTP_STATUS" -eq 200 ]; then
-  echo "Slack notification sent successfully."
-else
-  echo "[ERROR] Slack notification failed (HTTP $HTTP_STATUS)."
-  exit 1
-fi
-SLACKEOF
-
-# monitor-urls.sh
-cat > "$SCRIPTS_DIR/monitor-urls.sh" << 'MONITOREOF'
-#!/bin/bash
-set -euo pipefail
-
-LOG_DIR="$${1:-$HOME/claude-logs}"
-SESSION_NAME="$${2:-claude}"
-LOG_FILE="$LOG_DIR/$SESSION_NAME.log"
-TIMEOUT=300
-POLL_INTERVAL=5
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-echo "Monitoring $SESSION_NAME for Remote Control URL (timeout: $${TIMEOUT}s)..."
-
-START_TIME=$(date +%s)
-
-while true; do
-  if [ -f "$LOG_FILE" ]; then
-    URL=$(grep -oP 'https://claude\.ai/code/[^\s"]+' "$LOG_FILE" 2>/dev/null | tail -1 || true)
-
-    if [ -n "$URL" ]; then
-      echo "[$(date)] $SESSION_NAME: Remote Control URL detected: $URL"
-      "$SCRIPT_DIR/send-slack-notification.sh" "$SESSION_NAME Remote Control URL: $URL" || true
-      break
-    fi
-  fi
-
-  ELAPSED=$(( $(date +%s) - START_TIME ))
-  if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-    echo "Timeout reached ($${TIMEOUT}s). URL not detected."
-    break
-  fi
-
-  sleep "$POLL_INTERVAL"
-done
-MONITOREOF
-
-# start-claude-sessions.sh
-cat > "$SCRIPTS_DIR/start-claude-sessions.sh" << 'SESSIONEOF'
-#!/bin/bash
-set -euo pipefail
-
-if [ $# -lt 1 ]; then
-  echo "Usage: $0 <session-name>"
-  exit 1
-fi
-
-SESSION_NAME="$1"
-LOG_DIR="$HOME/claude-logs"
-LOG_FILE="$LOG_DIR/$SESSION_NAME.log"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-mkdir -p "$LOG_DIR"
-
-# Kill existing session for clean restart
-pkill -f monitor-urls.sh 2>/dev/null || true
-tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
-rm -f "$LOG_FILE" "$LOG_DIR/monitor.log"
-
-# Check Claude authentication
-if ! claude --version > /dev/null 2>&1; then
-  echo "ERROR: Claude Code CLI not found."
-  exit 1
-fi
-
-echo "Checking Claude authentication..."
-if [ ! -d "$HOME/.claude" ] || [ -z "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
-  echo "WARNING: Claude not authenticated. Run 'claude login' first."
-  echo "After login, re-run this script."
-  exit 1
-fi
-
-echo "Starting Claude Code remote-control session: $SESSION_NAME"
-
-tmux new-session -d -s "$SESSION_NAME"
-tmux send-keys -t "$SESSION_NAME" "yes | claude remote-control --dangerously-skip-permissions 2>&1 | tee -a $LOG_FILE" Enter
-
-echo "Session started: $SESSION_NAME"
-echo "Use 'tmux attach -t $SESSION_NAME' to attach."
-
-# Start URL monitor in background
-nohup "$SCRIPT_DIR/monitor-urls.sh" "$LOG_DIR" "$SESSION_NAME" > "$LOG_DIR/monitor.log" 2>&1 &
-echo "URL monitor started (PID: $!)."
-SESSIONEOF
-
-chmod +x "$SCRIPTS_DIR/"*.sh
+# --- Clone the infrastructure repository ---
+INFRA_DIR="/home/ubuntu/ec2-development-environment"
+echo "Cloning infrastructure repository: ${INFRA_REPO_URL}"
+git clone "${INFRA_REPO_URL}" "$INFRA_DIR"
+chown -R ubuntu:ubuntu "$INFRA_DIR"
 
 # --- Copy scripts into devcontainer ---
 CONTAINER_ID=$(docker ps --filter "label=devcontainer.local_folder" --format '{{.ID}}' | head -1)
 
 if [ -n "$CONTAINER_ID" ]; then
   docker exec "$CONTAINER_ID" mkdir -p /root/scripts
-  docker cp "$SCRIPTS_DIR/." "$CONTAINER_ID":/root/scripts/
+  docker cp "$INFRA_DIR/scripts/." "$CONTAINER_ID":/root/scripts/
   docker exec "$CONTAINER_ID" chown -R root:root /root/scripts
   docker exec "$CONTAINER_ID" sh -c 'chmod +x /root/scripts/*.sh'
 

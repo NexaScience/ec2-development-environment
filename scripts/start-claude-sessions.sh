@@ -1,48 +1,89 @@
 #!/bin/bash
-# Creates a tmux session running Claude Code remote-control.
-# Usage: start-claude-sessions.sh <session-name>
+# Manages Claude Code remote-control tmux sessions.
+# Usage:
+#   start-claude-sessions.sh -c <session-name>   Create a session
+#   start-claude-sessions.sh -r <session-name>   Remove a session
 # Designed to run inside the dev container.
 
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
-  echo "Usage: $0 <session-name>"
-  exit 1
+export PATH="$HOME/.local/bin:$PATH"
+if [ -f "$HOME/.claude-env" ]; then
+  set -a
+  source "$HOME/.claude-env"
+  set +a
 fi
-
-SESSION_NAME="$1"
 LOG_DIR="$HOME/claude-logs"
-LOG_FILE="$LOG_DIR/$SESSION_NAME.log"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/workspaces}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-mkdir -p "$LOG_DIR"
-
-# Kill existing session for clean restart
-pkill -f monitor-urls.sh 2>/dev/null || true
-tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
-rm -f "$LOG_FILE" "$LOG_DIR/monitor.log"
-
-# Check Claude authentication
-if ! claude --version > /dev/null 2>&1; then
-  echo "ERROR: Claude Code CLI not found."
+usage() {
+  echo "Usage:"
+  echo "  $0 -c <session-name>   Create a session"
+  echo "  $0 -r <session-name>   Remove a session"
   exit 1
+}
+
+create_session() {
+  local name="$1"
+  local log_file="$LOG_DIR/$name.log"
+
+  mkdir -p "$LOG_DIR"
+
+  # Check Claude authentication
+  if ! claude --version > /dev/null 2>&1; then
+    echo "ERROR: Claude Code CLI not found."
+    exit 1
+  fi
+
+  if [ ! -d "$HOME/.claude" ] || [ -z "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
+    echo "WARNING: Claude not authenticated. Run 'claude login' first."
+    exit 1
+  fi
+
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo "Session '$name' already exists."
+    exit 1
+  fi
+
+  # Accept workspace trust dialog if not yet trusted
+  echo "Accepting workspace trust for $WORKSPACE_DIR..."
+  cd "$WORKSPACE_DIR"
+  yes | claude -p "exit" > /dev/null 2>&1 || true
+
+  tmux new-session -d -s "$name" -c "$WORKSPACE_DIR"
+  tmux send-keys -t "$name" "claude remote-control --permission-mode acceptEdits 2>&1 | tee -a $log_file" Enter
+
+  echo "Session started: $name"
+
+  # Start URL monitor in background
+  nohup "$SCRIPT_DIR/monitor-urls.sh" "$LOG_DIR" "$name" > "$LOG_DIR/monitor-$name.log" 2>&1 &
+
+  # Attach to the session
+  tmux attach -t "$name"
+}
+
+remove_session() {
+  local name="$1"
+
+  tmux kill-session -t "$name" 2>/dev/null && echo "Session '$name' removed." || echo "Session '$name' not found."
+  rm -f "$LOG_DIR/$name.log" "$LOG_DIR/monitor-$name.log"
+}
+
+if [ $# -lt 1 ]; then
+  usage
 fi
 
-echo "Checking Claude authentication..."
-if [ ! -d "$HOME/.claude" ] || [ -z "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
-  echo "WARNING: Claude not authenticated. Run 'claude login' first."
-  echo "After login, re-run this script."
-  exit 1
-fi
-
-echo "Starting Claude Code remote-control session: $SESSION_NAME"
-
-tmux new-session -d -s "$SESSION_NAME"
-tmux send-keys -t "$SESSION_NAME" "yes | claude remote-control --dangerously-skip-permissions 2>&1 | tee -a $LOG_FILE" Enter
-
-echo "Session started: $SESSION_NAME"
-echo "Use 'tmux attach -t $SESSION_NAME' to attach."
-
-# Start URL monitor in background
-nohup "$SCRIPT_DIR/monitor-urls.sh" "$LOG_DIR" "$SESSION_NAME" > "$LOG_DIR/monitor.log" 2>&1 &
-echo "URL monitor started (PID: $!)."
+case "$1" in
+  -c)
+    [ $# -lt 2 ] && usage
+    create_session "$2"
+    ;;
+  -r)
+    [ $# -lt 2 ] && usage
+    remove_session "$2"
+    ;;
+  *)
+    usage
+    ;;
+esac

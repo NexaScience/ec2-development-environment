@@ -24,6 +24,7 @@ jobs:
       TF_VAR_SSH_PUBLIC_KEY: ${{ secrets.TF_VAR_SSH_PUBLIC_KEY }}
       TF_VAR_SLACK_WEBHOOK_URL: ${{ secrets.TF_VAR_SLACK_WEBHOOK_URL }}
       TF_VAR_GIT_REPO_URL: ${{ secrets.TF_VAR_GIT_REPO_URL }}
+      TF_VAR_INFRA_REPO_URL: ${{ secrets.TF_VAR_INFRA_REPO_URL }}
 
     steps:
       - name: Checkout
