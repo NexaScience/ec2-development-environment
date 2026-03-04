@@ -1,0 +1,22 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# Variables (may contain secrets)
+terraform.tfvars
+*.auto.tfvars
+
+# Environment
+.env
+
+# Claude Code
+.claude/settings.local.json
+.claude/projects/
+
+# OS
+.DS_Store
