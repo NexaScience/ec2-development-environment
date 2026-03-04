@@ -1,5 +1,5 @@
 #!/bin/bash
-# EC2 user_data script: clones app repo, starts its devcontainer, copies scripts in.
+# EC2 user_data script: clones app repo, starts its devcontainer, clones infra repo inside container.
 # Template variables are injected by Terraform's templatefile().
 # Terraform templatefile: use $$$${} to produce literal dollar-brace in output.
 
@@ -73,27 +73,20 @@ echo "Starting devcontainer..."
 # postCreateCommand may fail (e.g. pre-commit install) but container still starts
 sudo -u ubuntu bash -c "cd $REPO_DIR && devcontainer up --workspace-folder ." || true
 
-# --- Clone the infrastructure repository ---
-INFRA_DIR="/home/ubuntu/ec2-development-environment"
-echo "Cloning infrastructure repository: ${INFRA_REPO_URL}"
-git clone "${INFRA_REPO_URL}" "$INFRA_DIR"
-chown -R ubuntu:ubuntu "$INFRA_DIR"
-
-# --- Copy scripts into devcontainer ---
+# --- Clone infrastructure repository and set up scripts in devcontainer ---
 CONTAINER_ID=$(docker ps --filter "label=devcontainer.local_folder" --format '{{.ID}}' | head -1)
 
 if [ -n "$CONTAINER_ID" ]; then
-  docker exec "$CONTAINER_ID" mkdir -p /root/scripts
-  docker cp "$INFRA_DIR/scripts/." "$CONTAINER_ID":/root/scripts/
-  docker exec "$CONTAINER_ID" chown -R root:root /root/scripts
-  docker exec "$CONTAINER_ID" sh -c 'chmod +x /root/scripts/*.sh'
+  # Clone infra repo inside the container
+  docker exec "$CONTAINER_ID" git clone "${INFRA_REPO_URL}" /root/ec2-development-environment
+  docker exec "$CONTAINER_ID" ln -s /root/ec2-development-environment/scripts /root/scripts
 
   # Copy .claude-env into container for session env vars
   docker cp /home/ubuntu/.claude-env "$CONTAINER_ID":/root/.claude-env
 
-  echo "Scripts configured in container $CONTAINER_ID"
+  echo "Infrastructure repo cloned and scripts linked in container $CONTAINER_ID"
 else
-  echo "[WARN] No running devcontainer found. Scripts not copied."
+  echo "[WARN] No running devcontainer found. Scripts not set up."
 fi
 
 # --- Send startup Slack notification from host ---
@@ -104,4 +97,4 @@ if [ -n "${SLACK_WEBHOOK_URL}" ]; then
 fi
 
 echo "=== Setup complete ==="
-echo "Inside the container: claude login (first time), then ~/scripts/start-claude-sessions.sh"
+echo "Inside the container: claude login (first time), then ~/scripts/start-claude-sessions.sh -c <session-name>"

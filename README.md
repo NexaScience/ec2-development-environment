@@ -137,8 +137,8 @@ EC2インスタンス起動時に `user_data` で以下が自動実行される:
 4. 環境変数ファイル（`.claude-env`）の作成（`WORKSPACE_DIR` を自動算出）
 5. アプリリポジトリのクローン（`/home/ubuntu/<repo-name>`）
 6. `devcontainer up` でDevcontainerをビルド・起動
-7. インフラリポジトリのクローン（`/home/ubuntu/ec2-development-environment`）
-8. インフラリポの `scripts/` を `docker cp` でコンテナ内 `/root/scripts/` にコピー
+7. コンテナ内にインフラリポジトリをクローン（`/root/ec2-development-environment`）
+8. `~/scripts` → インフラリポの `scripts/` へシンボリックリンク作成
 9. Slack起動通知の送信
 
 ### Slack通知
@@ -197,11 +197,9 @@ Terraformで作成されるリソース:
 インスタンスを再作成せずにスクリプトを更新できる。
 
 ```bash
-# EC2ホストで:
-cd /home/ubuntu/ec2-development-environment && git pull
-
-# コンテナにコピー:
-CONTAINER_ID=$(docker ps --filter "label=devcontainer.local_folder" --format '{{.ID}}' | head -1)
-docker cp scripts/. "$CONTAINER_ID":/root/scripts/
+# コンテナ内で:
+cd ~/ec2-development-environment && git pull
 ```
+
+シンボリックリンク経由で `~/scripts/` が自動的に更新される。
 - `--dangerously-skip-permissions` フラグによりClaude Codeは全権限で動作する。信頼できる環境でのみ使用すること
