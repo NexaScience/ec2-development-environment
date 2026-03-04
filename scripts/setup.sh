@@ -252,7 +252,7 @@ if [ -n "$CONTAINER_ID" ]; then
 
 # Auto-start Claude remote-control sessions after login
 export PATH="$HOME/.local/bin:$PATH"
-if [ -n "$PS1" ] && command -v claude &>/dev/null; then
+if [[ $- == *i* ]] && command -v claude &>/dev/null; then
   if [ -d "$HOME/.claude" ] && [ -n "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
     if ! tmux has-session -t claude-1 2>/dev/null; then
       echo "Claude authenticated. Starting remote-control sessions..."
