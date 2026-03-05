@@ -32,7 +32,7 @@ usage() {
 # ── Utilities ──
 find_free_port() {
   local port="${1:-7681}"
-  while ss -tlnp 2>/dev/null | grep -q ":${port} "; do
+  while (echo >/dev/tcp/localhost/$port) 2>/dev/null; do
     port=$((port + 1))
   done
   echo "$port"
