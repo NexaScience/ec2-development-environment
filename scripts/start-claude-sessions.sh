@@ -182,7 +182,11 @@ create_session() {
 
   # ── 6. Start ttyd exposing the tmux session ──
   echo "Starting ttyd on port $ttyd_port..."
-  $TTYD -p "$ttyd_port" tmux attach -t "$name" \
+  $TTYD -p "$ttyd_port" -W \
+    -t fontSize=18 \
+    -t 'fontFamily="Menlo, Courier New, monospace"' \
+    -t disableLeaveAlert=true \
+    tmux attach -t "$name" \
     > "$LOG_DIR/${name}-ttyd.log" 2>&1 &
   local ttyd_pid=$!
 
