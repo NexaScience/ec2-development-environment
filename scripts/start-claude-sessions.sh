@@ -190,7 +190,7 @@ create_session() {
     -t fontSize=18 \
     -t 'fontFamily="Menlo, Courier New, monospace"' \
     -t disableLeaveAlert=true \
-    tmux attach -t "$name" \
+    tmux attach -t "$name":claude \
     > "$LOG_DIR/${name}-ttyd.log" 2>&1 &
   local ttyd_pid=$!
 
@@ -254,6 +254,9 @@ EOF
   echo "==============================="
 
   "$SCRIPT_DIR/send-slack-notification.sh" "$(echo -e "$slack_msg")" || true
+
+  # Attach to the tmux claude window so the terminal shows Claude Code
+  exec tmux attach -t "$name":claude
 }
 
 # ── Remove Session ──
