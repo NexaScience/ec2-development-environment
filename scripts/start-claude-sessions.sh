@@ -180,6 +180,9 @@ create_session() {
     echo "WARN: Frontend tunnel URL not detected within 30s."
   fi
 
+  # ── 6. Select claude window so ttyd shows it by default ──
+  tmux select-window -t "$name":claude
+
   # ── 6. Start ttyd exposing the tmux session ──
   echo "Starting ttyd on port $ttyd_port..."
   $TTYD -p "$ttyd_port" -W \
