@@ -52,6 +52,30 @@ resource "aws_security_group" "claude_dev" {
   }
 }
 
+# --- IAM Role for SSM ---
+resource "aws_iam_role" "ssm" {
+  name = "${var.PROJECT_NAME}-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.ssm.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ssm" {
+  name = "${var.PROJECT_NAME}-ssm-profile"
+  role = aws_iam_role.ssm.name
+}
+
 # --- EC2 Instance ---
 resource "aws_instance" "claude_dev" {
   ami                    = data.aws_ami.ubuntu.id
@@ -59,6 +83,7 @@ resource "aws_instance" "claude_dev" {
   key_name               = aws_key_pair.deploy.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.claude_dev.id]
+  iam_instance_profile   = aws_iam_instance_profile.ssm.name
 
   root_block_device {
     volume_size = var.ROOT_VOLUME_SIZE
