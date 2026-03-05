@@ -116,16 +116,6 @@ create_session() {
     exit 1
   fi
 
-  # Verify dependencies
-  if ! command -v cloudflared &>/dev/null; then
-    echo "ERROR: cloudflared not found. Install it in the devcontainer."
-    exit 1
-  fi
-  if ! command -v ttyd &>/dev/null; then
-    echo "ERROR: ttyd not found. Install it in the devcontainer."
-    exit 1
-  fi
-
   # Find free ports
   local ttyd_port backend_port frontend_port
   ttyd_port=$(find_free_port 7681)
