@@ -20,6 +20,7 @@ fi
 export SLACK_WEBHOOK_URL
 
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspaces/airas}"
+CLAUDE_USER="${CLAUDE_USER:-claude-user}"
 
 # ── Usage ──
 usage() {
@@ -130,7 +131,7 @@ create_session() {
   # ── 1. Create tmux session with Claude Code ──
   echo "Starting Claude Code in tmux session '$name'..."
   tmux new-session -d -s "$name" -n claude -c "$work_dir" \
-    "exec env -u CLAUDECODE claude --dangerously-skip-permissions"
+    "exec su - $CLAUDE_USER -c 'cd $work_dir && exec env -u CLAUDECODE claude --dangerously-skip-permissions'"
 
   # ── 2. Start backend in a new window ──
   echo "Starting backend on port $backend_port..."
