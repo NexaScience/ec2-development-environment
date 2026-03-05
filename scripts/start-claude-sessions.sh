@@ -8,8 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$HOME/claude-logs"
-CLOUDFLARED="/tmp/cloudflared"
-TTYD="/tmp/ttyd"
+CLOUDFLARED="cloudflared"
+TTYD="ttyd"
 
 # ── Load environment ──
 ENV_FILE="$SCRIPT_DIR/../.env"
@@ -36,31 +36,6 @@ find_free_port() {
     port=$((port + 1))
   done
   echo "$port"
-}
-
-install_cloudflared() {
-  if [ ! -x "$CLOUDFLARED" ]; then
-    echo "Installing cloudflared..."
-    curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$CLOUDFLARED"
-    chmod +x "$CLOUDFLARED"
-  fi
-}
-
-install_ttyd() {
-  if [ ! -x "$TTYD" ]; then
-    echo "Installing ttyd..."
-    local arch
-    arch=$(uname -m)
-    if [ "$arch" = "x86_64" ]; then
-      curl -sL "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64" -o "$TTYD"
-    elif [ "$arch" = "aarch64" ]; then
-      curl -sL "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.aarch64" -o "$TTYD"
-    else
-      echo "ERROR: Unsupported architecture: $arch"
-      exit 1
-    fi
-    chmod +x "$TTYD"
-  fi
 }
 
 wait_for_port() {
@@ -141,9 +116,15 @@ create_session() {
     exit 1
   fi
 
-  # Install dependencies
-  install_cloudflared
-  install_ttyd
+  # Verify dependencies
+  if ! command -v cloudflared &>/dev/null; then
+    echo "ERROR: cloudflared not found. Install it in the devcontainer."
+    exit 1
+  fi
+  if ! command -v ttyd &>/dev/null; then
+    echo "ERROR: ttyd not found. Install it in the devcontainer."
+    exit 1
+  fi
 
   # Find free ports
   local ttyd_port backend_port frontend_port
