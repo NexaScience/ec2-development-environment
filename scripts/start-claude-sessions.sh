@@ -1,294 +1,528 @@
 #!/bin/bash
-# Launch Claude Code dev session with ttyd + cloudflared tunnel + frontend/backend.
-#
-# Usage:
-#   start-claude-sessions.sh -c <session-name>   Create a session
-#   start-claude-sessions.sh -r <session-name>   Remove a session
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_DIR="$HOME/claude-logs"
-CLOUDFLARED="cloudflared"
-TTYD="ttyd"
+# ============================================================
+# Configuration
+# ============================================================
+REPO_DIR="/workspaces/airas"
+BACKEND_CMD_TEMPLATE="uv run uvicorn api.main:app --host 0.0.0.0 --port __PORT__ --log-level debug --reload"
+FRONTEND_CMD_TEMPLATE="npx vite --port __PORT__ --host 0.0.0.0"
 
-# ── Load environment ──
+# Slack Webhook URL (.envファイルから読み込み)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/../.env"
 SLACK_WEBHOOK_URL=""
-if [ -f "$ENV_FILE" ]; then
-  SLACK_WEBHOOK_URL=$(grep -oP '^TF_VAR_SLACK_WEBHOOK_URL="\K[^"]+' "$ENV_FILE" || true)
+if [[ -f "$ENV_FILE" ]]; then
+    SLACK_WEBHOOK_URL=$(grep -oP '^TF_VAR_SLACK_WEBHOOK_URL="\K[^"]+' "$ENV_FILE" || true)
 fi
-export SLACK_WEBHOOK_URL
+if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+    echo "ERROR: TF_VAR_SLACK_WEBHOOK_URL is not set in $ENV_FILE"
+    exit 1
+fi
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-/workspaces/airas}"
-CLAUDE_USER="${CLAUDE_USER:-claude-user}"
-
-# ── Usage ──
+# ============================================================
+# Usage
+# ============================================================
 usage() {
-  echo "Usage:"
-  echo "  $0 -c <session-name>   Create a session"
-  echo "  $0 -r <session-name>   Remove a session"
-  exit 1
-}
-
-# ── Utilities ──
-find_free_port() {
-  local port="${1:-7681}"
-  while (echo >/dev/tcp/localhost/$port) 2>/dev/null; do
-    port=$((port + 1))
-  done
-  echo "$port"
-}
-
-wait_for_port() {
-  local port="$1"
-  local timeout="${2:-30}"
-  local i=0
-  while [ "$i" -lt "$timeout" ]; do
-    if curl -s -o /dev/null "http://localhost:$port" 2>/dev/null; then
-      return 0
-    fi
-    sleep 1
-    i=$((i + 1))
-  done
-  return 1
-}
-
-wait_for_tunnel_url() {
-  local log_file="$1"
-  local timeout="${2:-30}"
-  local url=""
-  local i=0
-  while [ "$i" -lt "$timeout" ]; do
-    if [ -f "$log_file" ]; then
-      url=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' "$log_file" 2>/dev/null | head -1 || true)
-      if [ -n "$url" ]; then
-        echo "$url"
-        return 0
-      fi
-    fi
-    sleep 1
-    i=$((i + 1))
-  done
-  return 1
-}
-
-save_session_info() {
-  local name="$1"
-  local ttyd_port="$2"
-  local backend_port="$3"
-  local frontend_port="$4"
-  local ttyd_pid="$5"
-  local cloudflared_ttyd_pid="$6"
-  local cloudflared_backend_pid="$7"
-  local cloudflared_frontend_pid="$8"
-
-  mkdir -p "$LOG_DIR"
-  local info_file="$LOG_DIR/${name}.session"
-  cat > "$info_file" <<EOF
-TTYD_PORT=$ttyd_port
-BACKEND_PORT=$backend_port
-FRONTEND_PORT=$frontend_port
-TTYD_PID=$ttyd_pid
-CLOUDFLARED_TTYD_PID=$cloudflared_ttyd_pid
-CLOUDFLARED_BACKEND_PID=$cloudflared_backend_pid
-CLOUDFLARED_FRONTEND_PID=$cloudflared_frontend_pid
-EOF
-}
-
-# ── Create Session ──
-create_session() {
-  local name="$1"
-  local work_dir="$WORKSPACE_DIR"
-
-  mkdir -p "$LOG_DIR"
-
-  # Prevent nested tmux
-  unset TMUX 2>/dev/null || true
-  unset CLAUDECODE 2>/dev/null || true
-
-  # Validate
-  if [ -z "$SLACK_WEBHOOK_URL" ]; then
-    echo "ERROR: TF_VAR_SLACK_WEBHOOK_URL not set in $ENV_FILE"
+    echo "Usage: $0 -c <branch-name>   # Create session"
+    echo "       $0 -r <branch-name>   # Remove session and all resources"
+    echo ""
+    echo "Options:"
+    echo "  -c  Create a new Claude Code session with tmux, ttyd, cloudflare tunnels"
+    echo "  -r  Remove session: kill processes, remove worktree, delete user"
+    echo ""
+    echo "Environment variables:"
+    echo "  SLACK_WEBHOOK_URL  Slack Incoming Webhook URL"
     exit 1
-  fi
-
-  if ! env -u CLAUDECODE claude --version > /dev/null 2>&1; then
-    echo "ERROR: Claude Code CLI not found."
-    exit 1
-  fi
-
-  # Find free ports
-  local ttyd_port backend_port frontend_port
-  ttyd_port=$(find_free_port 7681)
-  backend_port=$(find_free_port 8000)
-  frontend_port=$(find_free_port 5173)
-
-  echo "Ports: ttyd=$ttyd_port, backend=$backend_port, frontend=$frontend_port"
-
-  # Kill previous session if exists
-  tmux kill-session -t "$name" 2>/dev/null || true
-
-  # ── 1. Create tmux session with Claude Code ──
-  echo "Starting Claude Code in tmux session '$name'..."
-  tmux new-session -d -s "$name" -n claude -c "$work_dir" \
-    "exec su - $CLAUDE_USER -c 'cd $work_dir && exec env -u CLAUDECODE claude --dangerously-skip-permissions'"
-
-  # ── 2. Start backend in a new window ──
-  echo "Starting backend on port $backend_port..."
-  tmux new-window -t "$name" -n backend -c "$work_dir/backend" \
-    "exec bash -lc 'uv run uvicorn api.main:app --host 0.0.0.0 --port $backend_port 2>&1 | tee $LOG_DIR/${name}-backend.log'"
-
-  # ── 3. Wait for backend, then start cloudflared for backend ──
-  echo "Waiting for backend (port $backend_port)..."
-  if ! wait_for_port "$backend_port" 60; then
-    echo "WARN: Backend did not start within 60s. Continuing anyway..."
-  fi
-
-  echo "Starting cloudflared tunnel for backend..."
-  $CLOUDFLARED tunnel --url "http://localhost:$backend_port" --no-autoupdate \
-    > "$LOG_DIR/${name}-tunnel-backend.log" 2>&1 &
-  local cloudflared_backend_pid=$!
-
-  echo "Waiting for backend tunnel URL..."
-  local backend_url=""
-  backend_url=$(wait_for_tunnel_url "$LOG_DIR/${name}-tunnel-backend.log" 30) || true
-  if [ -z "$backend_url" ]; then
-    echo "WARN: Backend tunnel URL not detected within 30s."
-  else
-    echo "Backend tunnel: $backend_url"
-  fi
-
-  # ── 4. Start frontend with VITE_API_BASE_URL pointing to backend tunnel ──
-  echo "Starting frontend on port $frontend_port..."
-  tmux new-window -t "$name" -n frontend -c "$work_dir/frontend" \
-    "exec bash -lc 'VITE_API_BASE_URL=$backend_url npm run dev -- --port $frontend_port 2>&1 | tee $LOG_DIR/${name}-frontend.log'"
-
-  echo "Waiting for frontend (port $frontend_port)..."
-  if ! wait_for_port "$frontend_port" 30; then
-    echo "WARN: Frontend did not start within 30s. Continuing anyway..."
-  fi
-
-  # ── 5. Start cloudflared tunnel for frontend ──
-  echo "Starting cloudflared tunnel for frontend..."
-  $CLOUDFLARED tunnel --url "http://localhost:$frontend_port" --no-autoupdate \
-    > "$LOG_DIR/${name}-tunnel-frontend.log" 2>&1 &
-  local cloudflared_frontend_pid=$!
-
-  echo "Waiting for frontend tunnel URL..."
-  local frontend_url=""
-  frontend_url=$(wait_for_tunnel_url "$LOG_DIR/${name}-tunnel-frontend.log" 30) || true
-  if [ -z "$frontend_url" ]; then
-    echo "WARN: Frontend tunnel URL not detected within 30s."
-  fi
-
-  # ── 6. Select claude window so ttyd shows it by default ──
-  tmux select-window -t "$name":claude
-
-  # ── 6. Start ttyd exposing the tmux session ──
-  echo "Starting ttyd on port $ttyd_port..."
-  $TTYD -p "$ttyd_port" -W \
-    -t fontSize=18 \
-    -t 'fontFamily="Menlo, Courier New, monospace"' \
-    -t disableLeaveAlert=true \
-    tmux attach -t "$name":claude \
-    > "$LOG_DIR/${name}-ttyd.log" 2>&1 &
-  local ttyd_pid=$!
-
-  # ── 7. Start cloudflared tunnel for ttyd ──
-  echo "Starting cloudflared tunnel for ttyd..."
-  $CLOUDFLARED tunnel --url "http://localhost:$ttyd_port" --no-autoupdate \
-    > "$LOG_DIR/${name}-tunnel-ttyd.log" 2>&1 &
-  local cloudflared_ttyd_pid=$!
-
-  echo "Waiting for ttyd tunnel URL..."
-  local ttyd_url=""
-  ttyd_url=$(wait_for_tunnel_url "$LOG_DIR/${name}-tunnel-ttyd.log" 30) || true
-  if [ -z "$ttyd_url" ]; then
-    echo "WARN: ttyd tunnel URL not detected within 30s."
-  fi
-
-  # ── 8. Save session info for cleanup ──
-  save_session_info "$name" "$ttyd_port" "$backend_port" "$frontend_port" \
-    "$ttyd_pid" "$cloudflared_ttyd_pid" "$cloudflared_backend_pid" "$cloudflared_frontend_pid"
-
-  # ── 9. Generate CLAUDE.local.md ──
-  local claude_local="$work_dir/.claude/CLAUDE.local.md"
-  mkdir -p "$(dirname "$claude_local")"
-  cat > "$claude_local" <<EOF
-# CLAUDE Local Development Guide
-
-回答は全て日本語で行ってください。
-
-## Error Capture
-\`backend\` と \`frontend\` はtmux sessionsで起動しています。エラーが発生した場合、以下のコマンドでエラー内容をキャプチャできます。
-
-- \`backend\` window:
-
-    \`\`\`bash
-    tmux capture-pane -t ${name}:backend -p
-    \`\`\`
-
-- \`frontend\` window:
-
-    \`\`\`bash
-    tmux capture-pane -t ${name}:frontend -p
-    \`\`\`
-EOF
-
-  # ── 10. Slack notification ──
-  local slack_msg="Session: $name"
-  if [ -n "$ttyd_url" ]; then
-    slack_msg="$slack_msg\nClaude (ttyd): $ttyd_url"
-  fi
-  if [ -n "$frontend_url" ]; then
-    slack_msg="$slack_msg\nFrontend: $frontend_url"
-  fi
-
-  echo ""
-  echo "=== Session '$name' started ==="
-  echo "  Claude (ttyd): ${ttyd_url:-not available}"
-  echo "  Frontend:      ${frontend_url:-not available}"
-  echo "  Backend:       ${backend_url:-not available}"
-  echo ""
-  echo "  tmux attach -t $name"
-  echo "==============================="
-
-  "$SCRIPT_DIR/send-slack-notification.sh" "$(echo -e "$slack_msg")" || true
-
-  # Attach to the tmux claude window so the terminal shows Claude Code
-  exec tmux attach -t "$name":claude
 }
 
-# ── Remove Session ──
-remove_session() {
-  local name="$1"
-  unset TMUX 2>/dev/null || true
-
-  local info_file="$LOG_DIR/${name}.session"
-  if [ -f "$info_file" ]; then
-    source "$info_file"
-    # Kill background processes
-    kill "$TTYD_PID" 2>/dev/null || true
-    kill "$CLOUDFLARED_TTYD_PID" 2>/dev/null || true
-    kill "$CLOUDFLARED_BACKEND_PID" 2>/dev/null || true
-    kill "$CLOUDFLARED_FRONTEND_PID" 2>/dev/null || true
-    rm -f "$info_file"
-  fi
-
-  # Kill tmux session
-  tmux kill-session -t "$name" 2>/dev/null && echo "Session '$name' removed." || echo "Session '$name' not found."
-
-  # Clean up logs
-  rm -f "$LOG_DIR/${name}"*.log
-}
-
-# ── Parse args ──
-if [ $# -lt 2 ]; then
-  usage
+if [[ $# -lt 2 ]]; then
+    usage
 fi
 
-case "$1" in
-  -c) create_session "$2" ;;
-  -r) remove_session "$2" ;;
-  *)  usage ;;
+MODE="$1"
+BRANCH_NAME="$2"
+SESSION_NAME="claude-${BRANCH_NAME}"
+USER_NAME="develop-${BRANCH_NAME}"
+STATE_DIR="/tmp/claude-session-${BRANCH_NAME}"
+TUNNEL_LOG_DIR="${STATE_DIR}/tunnels"
+
+# ============================================================
+# Helper: find a free port
+# ============================================================
+find_free_port() {
+    local port
+    while true; do
+        port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
+        # 他セッションで既に使用予定のポートと衝突しないか確認
+        if ! grep -rq "=${port}$" /tmp/claude-session-*/ports 2>/dev/null; then
+            echo "$port"
+            return 0
+        fi
+    done
+}
+
+# ============================================================
+# Validate prerequisites
+# ============================================================
+validate_prereqs() {
+    for cmd in tmux ttyd cloudflared claude git curl python3; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "Error: $cmd is not installed"
+            exit 1
+        fi
+    done
+}
+
+# ============================================================
+# Slack notification helper
+# ============================================================
+send_slack() {
+    local message="$1"
+    curl -s -X POST -H 'Content-type: application/json' \
+        --data "$message" \
+        "$SLACK_WEBHOOK_URL" || echo "[slack] Warning: Failed to send Slack notification"
+}
+
+# ============================================================
+# Remove mode (-r)
+# ============================================================
+do_remove() {
+    echo "============================================================"
+    echo "  Removing session: ${BRANCH_NAME}"
+    echo "============================================================"
+
+    # 1. Kill tmux session
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "[remove] Killing tmux session '${SESSION_NAME}'..."
+        tmux kill-session -t "$SESSION_NAME"
+    else
+        echo "[remove] tmux session '${SESSION_NAME}' not found (already stopped)"
+    fi
+
+    # 3. Kill processes via saved PID files
+    for pidfile in "${STATE_DIR}"/*.pid; do
+        if [[ -f "$pidfile" ]]; then
+            local pid
+            pid=$(cat "$pidfile")
+            local name
+            name=$(basename "$pidfile" .pid)
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "[remove] Killing ${name} (PID: ${pid})..."
+                kill "$pid" 2>/dev/null || true
+                sleep 1
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # 4. Kill any processes owned by the user
+    if id "$USER_NAME" &>/dev/null; then
+        echo "[remove] Killing all processes owned by '${USER_NAME}'..."
+        pkill -u "$USER_NAME" 2>/dev/null || true
+        sleep 1
+        pkill -9 -u "$USER_NAME" 2>/dev/null || true
+    fi
+
+    # 5. Remove git worktree
+    echo "[remove] Removing git worktree..."
+    cd "$REPO_DIR"
+    WORKTREE_DIR=$(git worktree list 2>/dev/null | grep "${BRANCH_NAME}" | awk '{print $1}') || true
+    if [[ -n "$WORKTREE_DIR" ]]; then
+        echo "[remove] Removing worktree at ${WORKTREE_DIR}..."
+        git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
+    else
+        echo "[remove] No worktree found for branch '${BRANCH_NAME}'"
+    fi
+
+    # 6. Delete branch (local only)
+    if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}" 2>/dev/null; then
+        echo "[remove] Deleting local branch '${BRANCH_NAME}'..."
+        git branch -D "$BRANCH_NAME" 2>/dev/null || true
+    fi
+
+    # 7. Delete Linux user
+    if id "$USER_NAME" &>/dev/null; then
+        echo "[remove] Deleting user '${USER_NAME}' and home directory..."
+        userdel -r "$USER_NAME" 2>/dev/null || true
+    else
+        echo "[remove] User '${USER_NAME}' not found (already deleted)"
+    fi
+
+    # 8. Clean up state directory
+    if [[ -d "$STATE_DIR" ]]; then
+        echo "[remove] Removing state directory ${STATE_DIR}..."
+        rm -rf "$STATE_DIR"
+    fi
+
+    # 9. Slack notification
+    echo "[slack] Sending stop notification..."
+    send_slack "$(cat <<SLACKEOF
+{
+    "blocks": [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "[STOPPED] Claude Code Session: ${BRANCH_NAME}"
+            }
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": "*Status:*\nSession terminated. All resources removed."
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": "*Branch:*\n\`${BRANCH_NAME}\`"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": "*User:*\n\`${USER_NAME}\` (deleted)"
+                }
+            ]
+        }
+    ]
+}
+SLACKEOF
+    )"
+
+    echo ""
+    echo "[done] All resources for '${BRANCH_NAME}' have been removed."
+}
+
+# ============================================================
+# Create mode (-c)
+# ============================================================
+do_create() {
+    validate_prereqs
+
+
+    # ============================================================
+    # Allocate free ports
+    # ============================================================
+    BACKEND_PORT=$(find_free_port)
+    FRONTEND_PORT=$(find_free_port)
+    TTYD_PORT=$(find_free_port)
+
+    BACKEND_CMD="${BACKEND_CMD_TEMPLATE/__PORT__/$BACKEND_PORT}"
+    FRONTEND_CMD="${FRONTEND_CMD_TEMPLATE/__PORT__/$FRONTEND_PORT}"
+
+    echo "[ports] Backend: ${BACKEND_PORT}, Frontend: ${FRONTEND_PORT}, ttyd: ${TTYD_PORT}"
+
+    # State directory for PID files and logs
+    mkdir -p "$STATE_DIR" "$TUNNEL_LOG_DIR"
+
+    # Save port info for reference
+    cat > "${STATE_DIR}/ports" <<EOF
+BACKEND_PORT=${BACKEND_PORT}
+FRONTEND_PORT=${FRONTEND_PORT}
+TTYD_PORT=${TTYD_PORT}
+EOF
+
+    # ============================================================
+    # Create Linux user
+    # ============================================================
+    if id "$USER_NAME" &>/dev/null; then
+        echo "[setup] User '${USER_NAME}' already exists."
+    else
+        echo "[setup] Creating user '${USER_NAME}'..."
+        useradd -m -s /bin/bash "$USER_NAME"
+    fi
+
+    # リポジトリおよび親ディレクトリへのアクセス権を付与
+    echo "[setup] Granting repo access to '${USER_NAME}'..."
+    # /workspaces の所有グループ (claude-user) に追加してディレクトリにアクセス可能にする
+    REPO_PARENT_DIR="$(dirname "$REPO_DIR")"
+    usermod -aG "$(stat -c '%G' "$REPO_PARENT_DIR")" "$USER_NAME" 2>/dev/null || true
+    usermod -aG "$(stat -c '%G' "$REPO_DIR")" "$USER_NAME" 2>/dev/null || true
+    chmod g+rwx "$REPO_DIR" 2>/dev/null || true
+
+    # claude コマンドが /root/.local/bin にあるため、他ユーザーからアクセスできるようにする
+    echo "[setup] Ensuring claude command is accessible to '${USER_NAME}'..."
+    chmod 755 /root 2>/dev/null || true
+    chmod 755 /root/.local 2>/dev/null || true
+    chmod 755 /root/.local/bin 2>/dev/null || true
+
+    # ユーザーの .bashrc に PATH を追加（重複追加しない）
+    USER_BASHRC="/home/${USER_NAME}/.bashrc"
+    if ! grep -q '/root/.local/bin' "$USER_BASHRC" 2>/dev/null; then
+        echo 'export PATH="/root/.local/bin:$PATH"' >> "$USER_BASHRC"
+        chown "$USER_NAME":"$USER_NAME" "$USER_BASHRC"
+    fi
+
+    # Claude Code の認証情報をユーザーにコピー
+    # コピー元: 現在のユーザー（root）の設定を使用
+    CLAUDE_CONFIG_SRC_DIR="${HOME}/.claude"
+    CLAUDE_CONFIG_SRC_FILE="${HOME}/.claude.json"
+    USER_HOME="/home/${USER_NAME}"
+
+    if [[ -f "$CLAUDE_CONFIG_SRC_FILE" ]]; then
+        echo "[setup] Copying Claude config to '${USER_NAME}'..."
+        cp "$CLAUDE_CONFIG_SRC_FILE" "${USER_HOME}/.claude.json"
+        chown "$USER_NAME":"$USER_NAME" "${USER_HOME}/.claude.json"
+    fi
+
+    if [[ -d "$CLAUDE_CONFIG_SRC_DIR" ]]; then
+        echo "[setup] Copying Claude credentials to '${USER_NAME}'..."
+        rm -rf "${USER_HOME}/.claude" 2>/dev/null || true
+        cp -r "$CLAUDE_CONFIG_SRC_DIR" "${USER_HOME}/.claude"
+        chown -R "$USER_NAME":"$USER_NAME" "${USER_HOME}/.claude"
+    fi
+
+    # ============================================================
+    # Git safe.directory 設定（別ユーザーでの操作に必要）
+    # ============================================================
+    git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
+    su -s /bin/bash "$USER_NAME" -c "git config --global --add safe.directory '$REPO_DIR'" 2>/dev/null || true
+
+    # ============================================================
+    # Create git worktree and install dependencies
+    # ============================================================
+    cd "$REPO_DIR"
+    WORKTREE_DIR="${REPO_DIR}/.worktrees/${BRANCH_NAME}"
+
+    # worktree が既に存在するか確認
+    EXISTING_WORKTREE=$(git worktree list 2>/dev/null | grep "${BRANCH_NAME}" | awk '{print $1}') || true
+    if [[ -n "$EXISTING_WORKTREE" && -d "$EXISTING_WORKTREE" ]]; then
+        WORKTREE_DIR="$EXISTING_WORKTREE"
+        echo "[setup] Worktree already exists at: ${WORKTREE_DIR}"
+    else
+        echo "[setup] Creating worktree at ${WORKTREE_DIR}..."
+        mkdir -p "$(dirname "$WORKTREE_DIR")"
+        # ブランチが既に存在する場合はチェックアウト、なければ新規作成
+        if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}" 2>/dev/null; then
+            git worktree add "$WORKTREE_DIR" "$BRANCH_NAME"
+        else
+            git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" develop
+        fi
+    fi
+
+    # worktree の所有権と safe.directory を設定
+    chown -R "$USER_NAME":"$USER_NAME" "$WORKTREE_DIR" 2>/dev/null || true
+    git config --global --add safe.directory "$WORKTREE_DIR" 2>/dev/null || true
+    su -s /bin/bash "$USER_NAME" -c "git config --global --add safe.directory '$WORKTREE_DIR'" 2>/dev/null || true
+
+    # メインリポジトリの gitignore されたファイルをシンボリックリンクで共有
+    GITIGNORED_FILES=(
+        ".env"
+        ".claude/CLAUDE.local.md"
+        ".claude/settings.local.json"
+    )
+    for rel_path in "${GITIGNORED_FILES[@]}"; do
+        if [[ -f "${REPO_DIR}/${rel_path}" && ! -e "${WORKTREE_DIR}/${rel_path}" ]]; then
+            mkdir -p "$(dirname "${WORKTREE_DIR}/${rel_path}")"
+            echo "[setup] Linking ${rel_path} from main repo to worktree..."
+            ln -s "${REPO_DIR}/${rel_path}" "${WORKTREE_DIR}/${rel_path}"
+        fi
+    done
+
+    # 依存関係のインストール
+    echo "[setup] Installing backend dependencies in worktree..."
+    (cd "${WORKTREE_DIR}/backend" && uv sync 2>&1 | tail -3) || true
+
+    echo "[setup] Installing frontend dependencies in worktree..."
+    (cd "${WORKTREE_DIR}/frontend" && npm install 2>&1 | tail -3) || true
+
+    # ============================================================
+    # Deploy tmux config
+    # ============================================================
+    TMUX_CONF_SRC="${SCRIPT_DIR}/../configs/.tmux.conf"
+    if [[ -f "$TMUX_CONF_SRC" ]]; then
+        echo "[setup] Deploying .tmux.conf..."
+        cp "$TMUX_CONF_SRC" /root/.tmux.conf
+        cp "$TMUX_CONF_SRC" "${USER_HOME}/.tmux.conf"
+        chown "$USER_NAME":"$USER_NAME" "${USER_HOME}/.tmux.conf"
+    fi
+
+    # ============================================================
+    # Kill existing tmux session if it exists
+    # ============================================================
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "[setup] Killing existing tmux session '${SESSION_NAME}'..."
+        tmux kill-session -t "$SESSION_NAME"
+    fi
+
+    # ============================================================
+    # Create tmux session with claude, backend, frontend windows
+    # ============================================================
+
+    # Window 0: Claude Code（worktree 内で起動）
+    echo "[setup] Creating tmux session '${SESSION_NAME}'..."
+    tmux new-session -d -s "$SESSION_NAME" -n "claude" -c "$WORKTREE_DIR"
+    tmux send-keys -t "${SESSION_NAME}:claude" "su - ${USER_NAME}" C-m
+    sleep 2
+    tmux send-keys -t "${SESSION_NAME}:claude" "cd ${WORKTREE_DIR} && claude --dangerously-skip-permissions" C-m
+
+    # Bypass Permissions の確認画面で「2. Yes, I accept」を自動選択
+    sleep 3
+    tmux send-keys -t "${SESSION_NAME}:claude" "2" Enter
+
+    # Window 1: Backend
+    tmux new-window -t "$SESSION_NAME" -n "backend" -c "${WORKTREE_DIR}/backend"
+    echo "[backend] Starting backend on port ${BACKEND_PORT}..."
+    tmux send-keys -t "${SESSION_NAME}:backend" \
+        "cd ${WORKTREE_DIR}/backend && ${BACKEND_CMD}" C-m
+
+    # Window 2: Frontend (cloudflare URL取得後に起動)
+    tmux new-window -t "$SESSION_NAME" -n "frontend" -c "${WORKTREE_DIR}/frontend"
+    tmux send-keys -t "${SESSION_NAME}:frontend" \
+        "echo 'Waiting for backend cloudflare URL...'" C-m
+
+    # ============================================================
+    # Start cloudflared tunnels (background)
+    # ============================================================
+    echo "[cloudflare] Starting tunnel for ttyd (port ${TTYD_PORT})..."
+    cloudflared tunnel --url "http://localhost:${TTYD_PORT}" \
+        --no-autoupdate \
+        2>"${TUNNEL_LOG_DIR}/ttyd.log" &
+    echo $! > "${STATE_DIR}/cloudflared-ttyd.pid"
+
+    echo "[cloudflare] Starting tunnel for backend (port ${BACKEND_PORT})..."
+    cloudflared tunnel --url "http://localhost:${BACKEND_PORT}" \
+        --no-autoupdate \
+        2>"${TUNNEL_LOG_DIR}/backend.log" &
+    echo $! > "${STATE_DIR}/cloudflared-backend.pid"
+
+    echo "[cloudflare] Starting tunnel for frontend (port ${FRONTEND_PORT})..."
+    cloudflared tunnel --url "http://localhost:${FRONTEND_PORT}" \
+        --no-autoupdate \
+        2>"${TUNNEL_LOG_DIR}/frontend.log" &
+    echo $! > "${STATE_DIR}/cloudflared-frontend.pid"
+
+    # ============================================================
+    # Wait for tunnel URLs
+    # ============================================================
+    get_tunnel_url() {
+        local log_file="$1"
+        local max_wait=30
+        local waited=0
+        while [[ $waited -lt $max_wait ]]; do
+            local url
+            url=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$log_file" 2>/dev/null | head -1) || true
+            if [[ -n "$url" ]]; then
+                echo "$url"
+                return 0
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        echo ""
+        return 1
+    }
+
+    echo "[cloudflare] Waiting for tunnel URLs..."
+
+    TTYD_URL=$(get_tunnel_url "${TUNNEL_LOG_DIR}/ttyd.log") || true
+    BACKEND_URL=$(get_tunnel_url "${TUNNEL_LOG_DIR}/backend.log") || true
+    FRONTEND_URL=$(get_tunnel_url "${TUNNEL_LOG_DIR}/frontend.log") || true
+
+    echo "[cloudflare] ttyd URL:     ${TTYD_URL:-FAILED}"
+    echo "[cloudflare] Backend URL:  ${BACKEND_URL:-FAILED}"
+    echo "[cloudflare] Frontend URL: ${FRONTEND_URL:-FAILED}"
+
+    # Save URLs for reference
+    cat > "${STATE_DIR}/urls" <<EOF
+TTYD_URL=${TTYD_URL:-}
+BACKEND_URL=${BACKEND_URL:-}
+FRONTEND_URL=${FRONTEND_URL:-}
+EOF
+
+    # ============================================================
+    # Start frontend with backend URL
+    # ============================================================
+    tmux send-keys -t "${SESSION_NAME}:frontend" C-c
+    sleep 1
+    if [[ -n "$BACKEND_URL" ]]; then
+        echo "[frontend] Starting frontend with VITE_API_URL=${BACKEND_URL}..."
+        tmux send-keys -t "${SESSION_NAME}:frontend" \
+            "VITE_API_URL=${BACKEND_URL} ${FRONTEND_CMD}" C-m
+    else
+        echo "[frontend] Warning: Backend URL not available. Starting frontend without API URL..."
+        tmux send-keys -t "${SESSION_NAME}:frontend" "${FRONTEND_CMD}" C-m
+    fi
+
+    # ============================================================
+    # Start ttyd → Claude Code 専用セッションのみ公開
+    # ============================================================
+    echo "[ttyd] Starting ttyd on port ${TTYD_PORT}..."
+    tmux select-window -t "${SESSION_NAME}:claude"
+    ttyd -p "$TTYD_PORT" -W tmux attach-session -t "${SESSION_NAME}:claude" &
+    echo $! > "${STATE_DIR}/ttyd.pid"
+
+    # ============================================================
+    # Send Slack notification (開始)
+    # ============================================================
+    echo "[slack] Sending start notification..."
+    send_slack "$(cat <<SLACKEOF
+{
+    "blocks": [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "[STARTED] Claude Code Session: ${BRANCH_NAME}"
+            }
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": "*Terminal (Claude Code):*\n<${TTYD_URL:-N/A}|Open Terminal>"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": "*Frontend:*\n<${FRONTEND_URL:-N/A}|Open Frontend>"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": "*Backend API:*\n<${BACKEND_URL:-N/A}|Open API>"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": "*Branch:*\n\`${BRANCH_NAME}\`"
+                }
+            ]
+        }
+    ]
+}
+SLACKEOF
+    )"
+
+    # ============================================================
+    # Summary and attach to Claude Code session
+    # ============================================================
+    echo ""
+    echo "============================================================"
+    echo "  Session '${BRANCH_NAME}' is ready!"
+    echo "  User:     ${USER_NAME}"
+    echo "  Terminal: ${TTYD_URL:-N/A}"
+    echo "  Frontend: ${FRONTEND_URL:-N/A}"
+    echo "  Backend:  ${BACKEND_URL:-N/A}"
+    echo "  Ports:    ttyd=${TTYD_PORT} backend=${BACKEND_PORT} frontend=${FRONTEND_PORT}"
+    echo ""
+    echo "  tmux attach -t ${SESSION_NAME}"
+    echo "============================================================"
+    echo ""
+
+    # Claude Code セッションにアタッチ（フルスクリーンで Claude Code のみ表示）
+    exec tmux attach-session -t "${SESSION_NAME}:claude"
+}
+
+# ============================================================
+# Main dispatch
+# ============================================================
+case "$MODE" in
+    -c)
+        do_create
+        ;;
+    -r)
+        do_remove
+        ;;
+    *)
+        usage
+        ;;
 esac
