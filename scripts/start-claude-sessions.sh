@@ -360,6 +360,53 @@ EOF
     sleep 3
     tmux send-keys -t "${SESSION_NAME}:claude" "2" Enter
 
+    # ============================================================
+    # Auth URL watcher: 認証URLをSlackに送信（バックグラウンド常駐）
+    # 通常は30秒間隔で軽く監視し、認証キーワード検出時のみ3秒間隔に切替
+    # ============================================================
+    (
+        AUTH_INTERVAL_IDLE=30
+        AUTH_INTERVAL_ACTIVE=3
+        AUTH_LAST_SENT=""
+        while tmux has-session -t "${SESSION_NAME}" 2>/dev/null; do
+            PANE_CONTENT=$(tmux capture-pane -t "${SESSION_NAME}:claude" -p 2>/dev/null) || true
+            # 認証関連のキーワードが画面にあるか確認
+            if echo "$PANE_CONTENT" | grep -qiP '(login|auth|sign.?in|oauth|verify)'; then
+                AUTH_URL=$(echo "$PANE_CONTENT" | grep -oP 'https://[^\s]+' | head -1) || true
+                if [[ -n "$AUTH_URL" && "$AUTH_URL" != "$AUTH_LAST_SENT" ]]; then
+                    send_slack "$(cat <<AUTHEOF
+{
+    "blocks": [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "[AUTH] Claude Code: ${BRANCH_NAME}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "認証が必要です。以下のURLをタップしてください:\n<${AUTH_URL}|認証URLを開く>"
+            }
+        }
+    ]
+}
+AUTHEOF
+                    )"
+                    AUTH_LAST_SENT="$AUTH_URL"
+                    echo "[auth-watcher] Auth URL sent to Slack: ${AUTH_URL}"
+                fi
+                sleep "$AUTH_INTERVAL_ACTIVE"
+            else
+                sleep "$AUTH_INTERVAL_IDLE"
+            fi
+        done
+        echo "[auth-watcher] Session ended. Stopping watcher."
+    ) &
+    echo $! > "${STATE_DIR}/auth-watcher.pid"
+
     # Window 1: Backend
     tmux new-window -t "$SESSION_NAME" -n "backend" -c "${WORKTREE_DIR}/backend"
     echo "[backend] Starting backend on port ${BACKEND_PORT}..."
