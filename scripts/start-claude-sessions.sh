@@ -235,13 +235,15 @@ EOF
 
     # リポジトリおよび親ディレクトリへのアクセス権を付与
     echo "[setup] Granting repo access to '${USER_NAME}'..."
-    # /workspaces の所有グループ (claude-user) に追加してディレクトリにアクセス可能にする
     REPO_PARENT_DIR="$(dirname "$REPO_DIR")"
     usermod -aG "$(stat -c '%G' "$REPO_PARENT_DIR")" "$USER_NAME" 2>/dev/null || true
     usermod -aG "$(stat -c '%G' "$REPO_DIR")" "$USER_NAME" 2>/dev/null || true
     chmod g+rwx "$REPO_DIR" 2>/dev/null || true
-    # .git ディレクトリをグループ書き込み可能にする（ブランチ切替時に refs/ 等への書込みが必要）
-    chmod -R g+rwx "${REPO_DIR}/.git" 2>/dev/null || true
+    # .git ディレクトリを全ユーザーから書き込み可能にする
+    # refs/, worktrees/, packed-refs 等への書込みがブランチ操作に必要
+    chmod -R a+rwx "${REPO_DIR}/.git" 2>/dev/null || true
+    # git が新規作成するファイルも全ユーザーに書込み権限を付与する設定
+    git -C "$REPO_DIR" config core.sharedRepository world 2>/dev/null || true
 
     # claude コマンドが /root/.local/bin にあるため、他ユーザーからアクセスできるようにする
     echo "[setup] Ensuring claude command is accessible to '${USER_NAME}'..."
