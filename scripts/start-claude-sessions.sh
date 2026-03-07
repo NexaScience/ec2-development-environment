@@ -369,7 +369,7 @@ EOF
         AUTH_INTERVAL_ACTIVE=3
         AUTH_LAST_SENT=""
         while tmux has-session -t "${SESSION_NAME}" 2>/dev/null; do
-            PANE_CONTENT=$(tmux capture-pane -t "${SESSION_NAME}:claude" -p 2>/dev/null) || true
+            PANE_CONTENT=$(tmux capture-pane -t "${SESSION_NAME}:claude" -p -J 2>/dev/null) || true
             # 認証関連のキーワードが画面にあるか確認
             if echo "$PANE_CONTENT" | grep -qiP '(login|auth|sign.?in|oauth|verify)'; then
                 AUTH_URL=$(echo "$PANE_CONTENT" | grep -oP 'https://[^\s]+' | head -1) || true
