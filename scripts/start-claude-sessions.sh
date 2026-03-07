@@ -240,6 +240,8 @@ EOF
     usermod -aG "$(stat -c '%G' "$REPO_PARENT_DIR")" "$USER_NAME" 2>/dev/null || true
     usermod -aG "$(stat -c '%G' "$REPO_DIR")" "$USER_NAME" 2>/dev/null || true
     chmod g+rwx "$REPO_DIR" 2>/dev/null || true
+    # .git ディレクトリをグループ書き込み可能にする（ブランチ切替時に refs/ 等への書込みが必要）
+    chmod -R g+rwx "${REPO_DIR}/.git" 2>/dev/null || true
 
     # claude コマンドが /root/.local/bin にあるため、他ユーザーからアクセスできるようにする
     echo "[setup] Ensuring claude command is accessible to '${USER_NAME}'..."
@@ -311,6 +313,12 @@ EOF
 
     # worktree の所有権と safe.directory を設定
     chown -R "$USER_NAME":"$USER_NAME" "$WORKTREE_DIR" 2>/dev/null || true
+    # メインリポジトリ内の worktree メタデータ (.git/worktrees/<name>) の所有権も変更
+    # これがないとセッションユーザーが git checkout / git switch できない
+    GIT_WORKTREE_META="${REPO_DIR}/.git/worktrees/${BRANCH_NAME}"
+    if [[ -d "$GIT_WORKTREE_META" ]]; then
+        chown -R "$USER_NAME":"$USER_NAME" "$GIT_WORKTREE_META" 2>/dev/null || true
+    fi
     git config --global --add safe.directory "$WORKTREE_DIR" 2>/dev/null || true
     su -s /bin/bash "$USER_NAME" -c "git config --global --add safe.directory '$WORKTREE_DIR'" 2>/dev/null || true
 
