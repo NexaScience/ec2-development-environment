@@ -375,10 +375,6 @@ EOF
     sleep 2
     tmux send-keys -t "${SESSION_NAME}:claude" "cd ${WORKTREE_DIR} && claude --dangerously-skip-permissions" C-m
 
-    # Bypass Permissions の確認画面で「2. Yes, I accept」を自動選択
-    sleep 3
-    tmux send-keys -t "${SESSION_NAME}:claude" "2" Enter
-
     # ============================================================
     # Auth URL watcher: 認証URLをSlackに送信（バックグラウンド常駐）
     # 通常は30秒間隔で軽く監視し、認証キーワード検出時のみ3秒間隔に切替
