@@ -372,7 +372,12 @@ EOF
             PANE_CONTENT=$(tmux capture-pane -t "${SESSION_NAME}:claude" -p -J 2>/dev/null) || true
             # 認証関連のキーワードが画面にあるか確認
             if echo "$PANE_CONTENT" | grep -qiP '(login|auth|sign.?in|oauth|verify)'; then
-                AUTH_URL=$(echo "$PANE_CONTENT" | grep -oP 'https://[^\s]+' | head -1) || true
+                # 各行の末尾空白を除去→全行結合→URLを抽出（折り返しで分断されたURLを復元）
+                AUTH_URL=$(echo "$PANE_CONTENT" \
+                    | sed 's/[[:space:]]*$//' \
+                    | tr -d '\n' \
+                    | grep -oP 'https://[A-Za-z0-9_.~:/?#@!$&()*+,;%=\-]+' \
+                    | head -1) || true
                 if [[ -n "$AUTH_URL" && "$AUTH_URL" != "$AUTH_LAST_SENT" ]]; then
                     send_slack "$(cat <<AUTHEOF
 {
