@@ -8,12 +8,13 @@ REPO_DIR="/workspaces/airas"
 BACKEND_CMD_TEMPLATE="uv run uvicorn api.main:app --host 0.0.0.0 --port __PORT__ --log-level debug --reload"
 FRONTEND_CMD_TEMPLATE="npx vite --port __PORT__ --host 0.0.0.0"
 
-# Slack Webhook URL (.envファイルから読み込み)
+# 環境変数の読み込み（リポジトリの .env を使用）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/../.env"
+ENV_FILE="${REPO_DIR}/.env"
 SLACK_WEBHOOK_URL=""
 if [[ -f "$ENV_FILE" ]]; then
-    SLACK_WEBHOOK_URL=$(grep -oP '^TF_VAR_SLACK_WEBHOOK_URL="\K[^"]+' "$ENV_FILE" || true)
+    SLACK_WEBHOOK_URL=$(grep -oP '^TF_VAR_SLACK_WEBHOOK_URL="\K[^"]+' "$ENV_FILE" \
+        || grep -oP '^TF_VAR_SLACK_WEBHOOK_URL=\K[^\s]+' "$ENV_FILE" || true)
 fi
 if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
     echo "ERROR: TF_VAR_SLACK_WEBHOOK_URL is not set in $ENV_FILE"
@@ -246,12 +247,20 @@ EOF
     chmod 755 /root/.local 2>/dev/null || true
     chmod 755 /root/.local/bin 2>/dev/null || true
 
-    # ユーザーの .bashrc に PATH を追加（重複追加しない）
+    # ユーザーの .bashrc に PATH と認証情報を追加（重複追加しない）
     USER_BASHRC="/home/${USER_NAME}/.bashrc"
     if ! grep -q '/root/.local/bin' "$USER_BASHRC" 2>/dev/null; then
         echo 'export PATH="/root/.local/bin:$PATH"' >> "$USER_BASHRC"
-        chown "$USER_NAME":"$USER_NAME" "$USER_BASHRC"
     fi
+
+    # CLAUDE_CODE_OAUTH_TOKEN を .env から読み込んでセッションユーザーに設定
+    CLAUDE_OAUTH_TOKEN=$(grep -oP '^CLAUDE_CODE_OAUTH_TOKEN="\K[^"]+' "$ENV_FILE" 2>/dev/null \
+        || grep -oP '^CLAUDE_CODE_OAUTH_TOKEN=\K[^\s]+' "$ENV_FILE" 2>/dev/null || true)
+    if [[ -n "$CLAUDE_OAUTH_TOKEN" ]] && ! grep -q 'CLAUDE_CODE_OAUTH_TOKEN' "$USER_BASHRC" 2>/dev/null; then
+        echo "export CLAUDE_CODE_OAUTH_TOKEN=\"${CLAUDE_OAUTH_TOKEN}\"" >> "$USER_BASHRC"
+    fi
+
+    chown "$USER_NAME":"$USER_NAME" "$USER_BASHRC"
 
     # Claude Code の認証情報をユーザーにコピー
     # コピー元: 現在のユーザー（root）の設定を使用
