@@ -385,13 +385,12 @@ EOF
         AUTH_LAST_SENT=""
         while tmux has-session -t "${SESSION_NAME}" 2>/dev/null; do
             PANE_CONTENT=$(tmux capture-pane -t "${SESSION_NAME}:claude" -p -J 2>/dev/null) || true
-            # 認証関連のキーワードが画面にあるか確認
-            if echo "$PANE_CONTENT" | grep -qiP '(login|auth|sign.?in|oauth|verify)'; then
-                # 各行の末尾空白を除去→全行結合→URLを抽出（折り返しで分断されたURLを復元）
+            # Anthropic認証URLのみを検出（console.anthropic.com / auth.anthropic.com）
+            if echo "$PANE_CONTENT" | grep -qP 'anthropic\.com'; then
                 AUTH_URL=$(echo "$PANE_CONTENT" \
                     | sed 's/[[:space:]]*$//' \
                     | tr -d '\n' \
-                    | grep -oP 'https://[A-Za-z0-9_.~:/?#@!$&()*+,;%=\-]+' \
+                    | grep -oP 'https://[a-z]+\.anthropic\.com[A-Za-z0-9_.~:/?#@!$&()*+,;%=\-]*' \
                     | head -1) || true
                 if [[ -n "$AUTH_URL" && "$AUTH_URL" != "$AUTH_LAST_SENT" ]]; then
                     send_slack "$(cat <<AUTHEOF
